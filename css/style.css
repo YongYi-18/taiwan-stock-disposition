@@ -506,6 +506,44 @@ main {
 .progress-bar-fill.up   { background: var(--risk-critical); }
 .progress-bar-fill.down { background: var(--primary); }
 
+/* ===== 處置中 Banner ===== */
+.disposal-banner {
+  background: #d93025;
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: 8px 8px 0 0;
+  margin: -16px -16px 14px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.disposal-period {
+  display: block;
+  font-size: 12px;
+  opacity: 0.85;
+  margin-top: 2px;
+}
+
+/* ===== 漲跌停標籤 ===== */
+.limit-tag {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.limit-up   { background: #fce8e6; color: #d93025; }
+.limit-down { background: #e8f0fe; color: #1a73e8; }
+
+/* 自選股處置中chip */
+.chip.chip-disposed {
+  background: #fce8e6;
+  color: #d93025;
+}
+
 /* ===== 響應式（桌機略寬） ===== */
 @media (min-width: 480px) {
   main { padding: 20px 16px 40px; }
