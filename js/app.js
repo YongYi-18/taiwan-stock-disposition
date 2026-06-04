@@ -70,38 +70,73 @@ async function loadStockCache() {
   }
 }
 
-// 今日官方處置清單（TWSE API）
+// 今日官方處置清單（TWSE 上市 + TPEx 上櫃，並行抓取）
 async function loadDisposalCache() {
   CACHE.disposals = new Map();
+  await Promise.allSettled([loadTWSEDisposals(), loadTPExDisposals()]);
+}
 
-  // 嘗試 TWSE rwd API
+// TWSE 上市處置清單
+async function loadTWSEDisposals() {
   const urls = [
     'https://www.twse.com.tw/rwd/zh/announcement/punish',
     'https://www.twse.com.tw/announcement/punish?response=json',
   ];
-
   for (const url of urls) {
     try {
       const resp = await fetch(url, { headers: { Accept: 'application/json' } });
       if (!resp.ok) continue;
       const json = await resp.json();
       if (!json.data || !Array.isArray(json.data)) continue;
-
       for (const row of json.data) {
         const code = (row[0] || '').trim();
         if (!code || !/^\d{4,6}$/.test(code)) continue;
-        // 欄位：[代號, 名稱, 開始日期, 停止日期, 備註/處置說明]
         const note    = String(row[4] || row[3] || '');
         const minutes = extractMinutes(note) || MINUTES_FIRST;
-        CACHE.disposals.set(code, {
-          minutes,
-          startDate: row[2] || '',
-          endDate:   row[3] || '',
-          note,
-        });
+        CACHE.disposals.set(code, { minutes, startDate: row[2] || '', endDate: row[3] || '', note });
       }
-      if (CACHE.disposals.size > 0) return;  // 成功取得就停止
-    } catch { /* 繼續試下一個 */ }
+      if (CACHE.disposals.size > 0) return;
+    } catch {}
+  }
+}
+
+// TPEx 上櫃處置清單
+async function loadTPExDisposals() {
+  const urls = [
+    'https://www.tpex.org.tw/openapi/v1/punish',
+    'https://www.tpex.org.tw/rwd/zh/announcement/punish',
+  ];
+  for (const url of urls) {
+    try {
+      const resp = await fetch(url, { headers: { Accept: 'application/json' } });
+      if (!resp.ok) continue;
+      const json = await resp.json();
+      const list = Array.isArray(json) ? json : (json.data || []);
+      let added = 0;
+      for (const item of list) {
+        if (Array.isArray(item)) {
+          // 陣列列格式（同 TWSE）
+          const code = (item[0] || '').trim();
+          if (!code || !/^\d{4,6}$/.test(code)) continue;
+          const note = String(item[4] || '');
+          CACHE.disposals.set(code, { minutes: extractMinutes(note) || MINUTES_FIRST, startDate: item[2] || '', endDate: item[3] || '', note });
+          added++;
+        } else if (item && typeof item === 'object') {
+          // 物件格式（TPEx OpenAPI）
+          const code = (item.SecuritiesCompanyCode || item.stock_id || '').trim();
+          if (!code || !/^\d{4,6}$/.test(code)) continue;
+          const note = String(item.DisposeNote || item.note || '');
+          CACHE.disposals.set(code, {
+            minutes: extractMinutes(note) || MINUTES_FIRST,
+            startDate: item.StartDate || item.start_date || '',
+            endDate:   item.EndDate   || item.end_date   || '',
+            note,
+          });
+          added++;
+        }
+      }
+      if (added > 0) return;
+    } catch {}
   }
 }
 
@@ -176,21 +211,69 @@ async function analyzeAndRender(code) {
   container.prepend(loadingEl);
 
   try {
-    const prices = await fetchPrices(code);
+    // 並行抓：價格資料 + 逐股處置狀態（FinMind）
+    const [prices, finmindDisposal] = await Promise.all([
+      fetchPrices(code),
+      fetchStockDisposalFromFinMind(code),
+    ]);
+
     if (!prices || prices.length < NOTICE_WINDOW) {
       throw new Error('資料不足，請確認股票代碼是否正確');
     }
 
-    const result      = computeDispositionRisk(prices);
-    const disposalInfo = CACHE.disposals?.get(code) || null;
-    const card        = buildCard(code, result, disposalInfo);
+    const result = computeDispositionRisk(prices);
 
+    // 處置資訊優先順序：FinMind 個別查詢 → 全局快取（TWSE/TPEx）
+    const disposalInfo = finmindDisposal || CACHE.disposals?.get(code) || null;
+
+    const card = buildCard(code, result, disposalInfo);
     loadingEl.replaceWith(card);
     renderedCards[code] = card;
   } catch (err) {
     loadingEl.innerHTML = `<span style="color:#d93025">⚠ ${err.message}</span>`;
     setTimeout(() => loadingEl.remove(), 4000);
   }
+}
+
+// 用 FinMind 查詢單一股票的處置期間（涵蓋上市+上櫃）
+async function fetchStockDisposalFromFinMind(stockCode) {
+  try {
+    const today = formatDate(new Date());
+    const start = formatDate(daysAgo(20));
+    const url   = `${FINMIND_API}?dataset=TaiwanStockDispositionSecuritiesPeriod&data_id=${encodeURIComponent(stockCode)}&start_date=${start}&end_date=${today}`;
+    const resp  = await fetch(url);
+    if (!resp.ok) return null;
+    const json = await resp.json();
+    if (!json.data || json.data.length === 0) return null;
+
+    // 找今日仍在效的處置期間（end_date >= today 或 end_date 為空）
+    const active = json.data
+      .filter(d => !d.end_date || d.end_date >= today)
+      .sort((a, b) => (b.start_date || '').localeCompare(a.start_date || ''))[0];
+
+    if (!active) return null;
+
+    // FinMind 欄位名稱不確定，嘗試多種可能
+    const noteVal = active.disposal_memo || active.note || active.remark || active.description || '';
+    const minutes = extractMinutes(noteVal) || guessMinutesFromPeriod(active) || MINUTES_FIRST;
+
+    return {
+      minutes,
+      startDate: active.start_date || active.date || '',
+      endDate:   active.end_date   || '',
+      note:      noteVal,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// 若無法從備註解析分鐘數，根據已有處置次數猜測
+function guessMinutesFromPeriod(record) {
+  // FinMind 可能有 disposal_type 或類似欄位
+  const typeStr = String(record.disposal_type || record.type || '');
+  if (typeStr.includes('20') || typeStr.includes('加重')) return MINUTES_REPEAT;
+  return null;
 }
 
 // ── FinMind 價格資料 ──────────────────────────────────
@@ -375,7 +458,8 @@ function buildCard(code, r, disposalInfo) {
 
   // ── 股票標題 ───────────────────────────────────────
   card.querySelector('.stock-code').textContent = code;
-  card.querySelector('.stock-name').textContent = r.stockName || '';
+  // 名稱優先從快取取（FinMind TaiwanStockInfo），若快取未載入則用價格資料附帶的名稱
+  card.querySelector('.stock-name').textContent = CACHE.stockMap?.get(code) || r.stockName || '';
 
   // ── 價格 ───────────────────────────────────────────
   card.querySelector('.price-value').textContent = `$${r.latestClose.toFixed(2)}`;
