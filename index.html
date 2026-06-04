@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>台股處置預測</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header>
+    <h1>台股處置預測</h1>
+    <p class="subtitle">預測股票進入處置的時機與集合競價間隔</p>
+  </header>
+
+  <main>
+    <!-- 搜尋區 -->
+    <section class="search-section">
+      <div class="search-bar">
+        <input
+          type="text"
+          id="searchInput"
+          placeholder="輸入股票代碼，如 2330"
+          maxlength="6"
+          inputmode="numeric"
+        >
+        <button id="searchBtn">查詢</button>
+      </div>
+      <div id="searchError" class="error-msg hidden"></div>
+    </section>
+
+    <!-- 自選股清單 -->
+    <section class="watchlist-section">
+      <div class="watchlist-header">
+        <h2>自選股清單</h2>
+        <span class="watchlist-count" id="watchlistCount">0 / 20</span>
+      </div>
+      <div id="watchlistChips" class="watchlist-chips"></div>
+    </section>
+
+    <!-- 分析結果區 -->
+    <section id="resultsSection" class="results-section">
+      <div id="resultsContainer"></div>
+    </section>
+
+    <!-- 免責聲明 -->
+    <section class="disclaimer">
+      <details>
+        <summary>計算方式說明與免責聲明</summary>
+        <div class="disclaimer-content">
+          <p><strong>注意條件（第四條第一款簡化版）</strong>：最近6個營業日收盤價累積漲/跌幅超過 ±32%。官方規則尚需「與全市場差幅 > 20%」，本工具省略此條件，僅供參考。</p>
+          <p><strong>處置觸發條件（第六條）</strong>：
+            連續3日被注意（第一款）；或連續5日、最近10日內6日、30日內12日被注意（第一至八款）。
+          </p>
+          <p><strong>處置措施</strong>：第一次進入處置 → 每 <strong>5分鐘</strong>集合競價；第二次以上 → 每 <strong>20分鐘</strong>集合競價，各持續10個營業日。</p>
+          <p><strong>資料來源</strong>：<a href="https://api.finmindtrade.com" target="_blank" rel="noopener">FinMind API</a>，收盤後更新，非即時。成交量異常等其他注意款未納入計算。</p>
+          <p><strong>官方公告</strong>：
+            <a href="https://www.twse.com.tw/zh/announcement/notice.html" target="_blank" rel="noopener">TWSE 注意股票</a> |
+            <a href="https://www.twse.com.tw/zh/announcement/punish.html" target="_blank" rel="noopener">TWSE 處置股票</a>
+          </p>
+          <p class="disclaimer-warning">本工具僅供參考，不構成投資建議。</p>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <!-- 股票卡片模板 -->
+  <template id="stockCardTemplate">
+    <div class="stock-card">
+      <div class="card-header">
+        <div class="stock-title">
+          <span class="stock-code"></span>
+          <span class="stock-name"></span>
+        </div>
+        <div class="card-actions">
+          <button class="btn-watchlist" title="加入/移除自選股"></button>
+          <button class="btn-remove-card" title="關閉">✕</button>
+        </div>
+      </div>
+
+      <div class="price-row">
+        <span class="price-value"></span>
+        <span class="price-change"></span>
+        <span class="price-date"></span>
+      </div>
+
+      <div class="risk-badge-row">
+        <span class="risk-badge"></span>
+        <span class="risk-label"></span>
+      </div>
+
+      <div class="metrics-grid">
+        <div class="metric">
+          <div class="metric-label">6日累積漲跌幅</div>
+          <div class="metric-value" data-key="cum6"></div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">距注意門檻(±32%)</div>
+          <div class="metric-value" data-key="gap32"></div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">連續注意天數</div>
+          <div class="metric-value" data-key="consecutive"></div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">10日內注意次數</div>
+          <div class="metric-value" data-key="count10"></div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">30日內注意次數</div>
+          <div class="metric-value" data-key="count30"></div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">最近30日處置紀錄</div>
+          <div class="metric-value" data-key="prevDispose"></div>
+        </div>
+      </div>
+
+      <div class="disposition-box hidden">
+        <div class="disposition-title">⚠️ 處置風險提示</div>
+        <div class="disposition-detail" data-key="disposeDetail"></div>
+      </div>
+
+      <div class="threshold-box">
+        <div class="threshold-title">📌 今日收盤門檻（觸發注意條件）</div>
+        <div class="threshold-row">
+          <span class="threshold-label">上漲方向</span>
+          <span class="threshold-value" data-key="threshUpper"></span>
+        </div>
+        <div class="threshold-row">
+          <span class="threshold-label">下跌方向</span>
+          <span class="threshold-value" data-key="threshLower"></span>
+        </div>
+        <div class="threshold-note">收盤達到上述價位，6日累積漲/跌幅將突破 32%，可能觸發「注意股票」</div>
+      </div>
+
+      <div class="card-footer">
+        <span class="data-time"></span>
+        <a class="twse-link" href="#" target="_blank" rel="noopener">TWSE查詢 ↗</a>
+      </div>
+    </div>
+  </template>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
