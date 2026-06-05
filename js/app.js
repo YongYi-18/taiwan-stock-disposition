@@ -7,7 +7,7 @@
 'use strict';
 
 // ── 版本 ──────────────────────────────────────────────
-const VERSION = '2026-06-05';
+const VERSION = '2026-06-05.1';
 
 // ── 常數 ──────────────────────────────────────────────
 const FINMIND_API   = 'https://api.finmindtrade.com/api/v4/data';
@@ -107,26 +107,34 @@ async function loadTWSEDisposals() {
 
 // TPEx 上櫃處置清單
 // 欄位：SecuritiesCompanyCode, DispositionPeriod("1150605~1150618"), DisposalCondition
+// corsproxy.io 作為 CORS fallback（直連被瀏覽器 CORS 政策擋時使用）
 async function loadTPExDisposals() {
-  try {
-    const resp = await fetch('https://www.tpex.org.tw/openapi/v1/tpex_disposal_information', { headers: { Accept: 'application/json' } });
-    if (!resp.ok) return;
-    const list = await resp.json();
-    if (!Array.isArray(list)) return;
-    for (const item of list) {
-      const code = (item.SecuritiesCompanyCode || '').trim();
-      if (!code || !/^\d{4,6}$/.test(code)) continue;
-      const note = String(item.DisposalCondition || item.DispositionReasons || '');
-      const { startDate, endDate } = parseDisposalPeriod(item.DispositionPeriod);
-      CACHE.disposals.set(code, {
-        minutes:   minutesFromMeasures(note),
-        startDate,
-        endDate,
-        note,
-      });
+  const direct = 'https://www.tpex.org.tw/openapi/v1/tpex_disposal_information';
+  const proxy  = `https://corsproxy.io/?url=${encodeURIComponent(direct)}`;
+
+  for (const url of [direct, proxy]) {
+    try {
+      const resp = await fetch(url);   // 不帶 Accept header → 簡單請求，避免觸發 preflight
+      if (!resp.ok) continue;
+      const list = await resp.json();
+      if (!Array.isArray(list) || !list.length) continue;
+      for (const item of list) {
+        const code = (item.SecuritiesCompanyCode || '').trim();
+        if (!code || !/^\d{4,6}$/.test(code)) continue;
+        const note = String(item.DisposalCondition || item.DispositionReasons || '');
+        const { startDate, endDate } = parseDisposalPeriod(item.DispositionPeriod);
+        CACHE.disposals.set(code, {
+          minutes:   minutesFromMeasures(note),
+          startDate,
+          endDate,
+          note,
+        });
+      }
+      console.log(`[TPEx disposal] 已載入，共 ${CACHE.disposals.size} 支，來源：${url === direct ? '直連' : '代理'}`);
+      return;
+    } catch (e) {
+      console.warn('[TPEx disposal] 失敗：', url, e?.message);
     }
-  } catch (e) {
-    console.warn('[TPEx disposal]', e?.message);
   }
 }
 
