@@ -28,8 +28,9 @@ const CACHE = {
 };
 
 // ── 狀態 ──────────────────────────────────────────────
-let watchlist    = loadWatchlist();
-let renderedCards = {};
+let watchlist        = loadWatchlist();
+let renderedCards    = {};
+let disposalCacheReady = null;  // Promise，供 analyzeAndRender 等候
 
 // ── 頁面初始化 ────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -42,7 +43,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 背景載入股票清單與處置清單
   loadStockCache().catch(() => {});
-  loadDisposalCache().catch(() => {});
+  disposalCacheReady = loadDisposalCache().catch(() => {});
 
   if (watchlist.length > 0) {
     watchlist.forEach(code => analyzeAndRender(code));
@@ -77,66 +78,51 @@ async function loadDisposalCache() {
 }
 
 // TWSE 上市處置清單
+// 欄位：Code, DispositionPeriod("115/05/28～115/06/10"), DispositionMeasures("第一次處置")
 async function loadTWSEDisposals() {
-  const urls = [
-    'https://www.twse.com.tw/rwd/zh/announcement/punish',
-    'https://www.twse.com.tw/announcement/punish?response=json',
-  ];
-  for (const url of urls) {
-    try {
-      const resp = await fetch(url, { headers: { Accept: 'application/json' } });
-      if (!resp.ok) continue;
-      const json = await resp.json();
-      if (!json.data || !Array.isArray(json.data)) continue;
-      for (const row of json.data) {
-        const code = (row[0] || '').trim();
-        if (!code || !/^\d{4,6}$/.test(code)) continue;
-        const note    = String(row[4] || row[3] || '');
-        const minutes = extractMinutes(note) || MINUTES_FIRST;
-        CACHE.disposals.set(code, { minutes, startDate: row[2] || '', endDate: row[3] || '', note });
-      }
-      if (CACHE.disposals.size > 0) return;
-    } catch {}
+  try {
+    const resp = await fetch('https://openapi.twse.com.tw/v1/announcement/punish', { headers: { Accept: 'application/json' } });
+    if (!resp.ok) return;
+    const list = await resp.json();
+    if (!Array.isArray(list)) return;
+    for (const row of list) {
+      const code = (row.Code || '').trim();
+      if (!code || !/^\d{4,6}$/.test(code)) continue;
+      const { startDate, endDate } = parseDisposalPeriod(row.DispositionPeriod);
+      CACHE.disposals.set(code, {
+        minutes:   minutesFromMeasures(row.DispositionMeasures),
+        startDate,
+        endDate,
+        note: row.DispositionMeasures || '',
+      });
+    }
+  } catch (e) {
+    console.warn('[TWSE disposal]', e?.message);
   }
 }
 
 // TPEx 上櫃處置清單
+// 欄位：SecuritiesCompanyCode, DispositionPeriod("1150605~1150618"), DisposalCondition
 async function loadTPExDisposals() {
-  const urls = [
-    'https://www.tpex.org.tw/openapi/v1/punish',
-    'https://www.tpex.org.tw/rwd/zh/announcement/punish',
-  ];
-  for (const url of urls) {
-    try {
-      const resp = await fetch(url, { headers: { Accept: 'application/json' } });
-      if (!resp.ok) continue;
-      const json = await resp.json();
-      const list = Array.isArray(json) ? json : (json.data || []);
-      let added = 0;
-      for (const item of list) {
-        if (Array.isArray(item)) {
-          // 陣列列格式（同 TWSE）
-          const code = (item[0] || '').trim();
-          if (!code || !/^\d{4,6}$/.test(code)) continue;
-          const note = String(item[4] || '');
-          CACHE.disposals.set(code, { minutes: extractMinutes(note) || MINUTES_FIRST, startDate: item[2] || '', endDate: item[3] || '', note });
-          added++;
-        } else if (item && typeof item === 'object') {
-          // 物件格式（TPEx OpenAPI）
-          const code = (item.SecuritiesCompanyCode || item.stock_id || '').trim();
-          if (!code || !/^\d{4,6}$/.test(code)) continue;
-          const note = String(item.DisposeNote || item.note || '');
-          CACHE.disposals.set(code, {
-            minutes: extractMinutes(note) || MINUTES_FIRST,
-            startDate: item.StartDate || item.start_date || '',
-            endDate:   item.EndDate   || item.end_date   || '',
-            note,
-          });
-          added++;
-        }
-      }
-      if (added > 0) return;
-    } catch {}
+  try {
+    const resp = await fetch('https://www.tpex.org.tw/openapi/v1/tpex_disposal_information', { headers: { Accept: 'application/json' } });
+    if (!resp.ok) return;
+    const list = await resp.json();
+    if (!Array.isArray(list)) return;
+    for (const item of list) {
+      const code = (item.SecuritiesCompanyCode || '').trim();
+      if (!code || !/^\d{4,6}$/.test(code)) continue;
+      const note = String(item.DisposalCondition || item.DispositionReasons || '');
+      const { startDate, endDate } = parseDisposalPeriod(item.DispositionPeriod);
+      CACHE.disposals.set(code, {
+        minutes:   minutesFromMeasures(note),
+        startDate,
+        endDate,
+        note,
+      });
+    }
+  } catch (e) {
+    console.warn('[TPEx disposal]', e?.message);
   }
 }
 
@@ -211,10 +197,11 @@ async function analyzeAndRender(code) {
   container.prepend(loadingEl);
 
   try {
-    // 並行抓：價格資料 + 逐股處置狀態（FinMind）
+    // 並行抓：價格資料 + 逐股處置狀態（FinMind）+ 等候官方處置快取
     const [prices, finmindDisposal] = await Promise.all([
       fetchPrices(code),
       fetchStockDisposalFromFinMind(code),
+      disposalCacheReady,   // 確保 TWSE/TPEx 快取已載入
     ]);
 
     if (!prices || prices.length < NOTICE_WINDOW) {
@@ -223,8 +210,8 @@ async function analyzeAndRender(code) {
 
     const result = computeDispositionRisk(prices);
 
-    // 處置資訊優先順序：FinMind 個別查詢 → 全局快取（TWSE/TPEx）
-    const disposalInfo = finmindDisposal || CACHE.disposals?.get(code) || null;
+    // 處置資訊優先順序：官方快取（TWSE/TPEx） → FinMind 個別查詢
+    const disposalInfo = CACHE.disposals?.get(code) || finmindDisposal || null;
 
     const card = buildCard(code, result, disposalInfo);
     loadingEl.replaceWith(card);
@@ -705,19 +692,42 @@ function formatROCDate(dateStr) {
   if (!dateStr) return '';
   let year, month, day;
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    // ISO: 2025-05-26
     [year, month, day] = dateStr.split('-').map(Number);
   } else if (/^\d{3}[\/\-]\d{2}[\/\-]\d{2}$/.test(dateStr)) {
+    // ROC with slashes: 115/05/26（TWSE）
     const parts = dateStr.split(/[\/\-]/);
     year = parseInt(parts[0]) + 1911;
     month = parseInt(parts[1]);
     day = parseInt(parts[2]);
+  } else if (/^\d{7}$/.test(dateStr)) {
+    // ROC compact: 1150526（TPEx）
+    year  = parseInt(dateStr.substring(0, 3)) + 1911;
+    month = parseInt(dateStr.substring(3, 5));
+    day   = parseInt(dateStr.substring(5, 7));
   } else {
     return dateStr;
   }
-  const rocYear = year - 1911;
+  const rocYear  = year - 1911;
   const weekDays = ['日', '一', '二', '三', '四', '五', '六'];
-  const weekDay = weekDays[new Date(year, month - 1, day).getDay()];
+  const weekDay  = weekDays[new Date(year, month - 1, day).getDay()];
   return `${rocYear}/${String(month).padStart(2,'0')}/${String(day).padStart(2,'0')}(${weekDay})`;
+}
+
+// "第一次處置" → 5分；"第二次/加重/曾發布處置" → 20分
+function minutesFromMeasures(str) {
+  const s = String(str || '');
+  const m = extractMinutes(s);
+  if (m) return m;
+  if (/第[二三四五六七八九十]次|加重|曾發布處置/.test(s)) return MINUTES_REPEAT;
+  return MINUTES_FIRST;
+}
+
+// 解析 "115/05/28～115/06/10" 或 "1150528~1150610" → { startDate, endDate }
+function parseDisposalPeriod(period) {
+  if (!period) return { startDate: '', endDate: '' };
+  const parts = String(period).split(/[～~]/);
+  return { startDate: (parts[0] || '').trim(), endDate: (parts[1] || '').trim() };
 }
 
 function extractMinutes(str) {
