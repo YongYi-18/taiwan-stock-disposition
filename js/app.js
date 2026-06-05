@@ -449,10 +449,17 @@ function buildCard(code, r, disposalInfo) {
   if (isOfficiallyDisposed) {
     const banner = document.createElement('div');
     banner.className = 'disposal-banner';
-    const period = (disposalInfo.startDate && disposalInfo.endDate)
-      ? `<span class="disposal-period">處置期間：${disposalInfo.startDate} 至 ${disposalInfo.endDate}</span>`
-      : '';
-    banner.innerHTML = `🔴 <strong>處置中</strong> — 每 <strong>${displayMinutes} 分鐘</strong>分盤集合競價${period}`;
+    let periodHtml = '';
+    if (disposalInfo.startDate || disposalInfo.endDate) {
+      const start = disposalInfo.startDate ? formatROCDate(disposalInfo.startDate) : '—';
+      const end   = disposalInfo.endDate   ? formatROCDate(disposalInfo.endDate)   : '—';
+      periodHtml = `<div class="disposal-row"><span class="disposal-label">處置期間</span><span class="disposal-val">${start}～${end}</span></div>`;
+    }
+    banner.innerHTML = `
+      <div class="disposal-row"><span class="disposal-label">狀態</span><span class="disposal-val disposal-status">🔴 處置中</span></div>
+      <div class="disposal-row"><span class="disposal-label">撮合週期</span><span class="disposal-val">${displayMinutes} 分鐘</span></div>
+      ${periodHtml}
+    `;
     card.insertBefore(banner, card.firstChild);
   }
 
@@ -692,6 +699,25 @@ function daysAgo(n) {
 
 function normStr(s) {
   return s.replace(/[\s　]/g, '').toLowerCase();
+}
+
+function formatROCDate(dateStr) {
+  if (!dateStr) return '';
+  let year, month, day;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    [year, month, day] = dateStr.split('-').map(Number);
+  } else if (/^\d{3}[\/\-]\d{2}[\/\-]\d{2}$/.test(dateStr)) {
+    const parts = dateStr.split(/[\/\-]/);
+    year = parseInt(parts[0]) + 1911;
+    month = parseInt(parts[1]);
+    day = parseInt(parts[2]);
+  } else {
+    return dateStr;
+  }
+  const rocYear = year - 1911;
+  const weekDays = ['日', '一', '二', '三', '四', '五', '六'];
+  const weekDay = weekDays[new Date(year, month - 1, day).getDay()];
+  return `${rocYear}/${String(month).padStart(2,'0')}/${String(day).padStart(2,'0')}(${weekDay})`;
 }
 
 function extractMinutes(str) {
