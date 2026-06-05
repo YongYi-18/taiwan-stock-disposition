@@ -75,66 +75,26 @@ async function loadStockCache() {
   }
 }
 
-// 今日官方處置清單（TWSE 上市 + TPEx 上櫃，並行抓取）
+// 處置清單由 GitHub Actions 每日自動更新至 data/disposal.json
+// 前端直接讀同源檔案，避免 CORS 問題
 async function loadDisposalCache() {
   CACHE.disposals = new Map();
-  await Promise.allSettled([loadTWSEDisposals(), loadTPExDisposals()]);
-}
-
-// TWSE 上市處置清單
-// 欄位：Code, DispositionPeriod("115/05/28～115/06/10"), DispositionMeasures("第一次處置")
-async function loadTWSEDisposals() {
   try {
-    const resp = await fetch('https://openapi.twse.com.tw/v1/announcement/punish', { headers: { Accept: 'application/json' } });
+    const resp = await fetch('./data/disposal.json');
     if (!resp.ok) return;
-    const list = await resp.json();
-    if (!Array.isArray(list)) return;
-    for (const row of list) {
-      const code = (row.Code || '').trim();
-      if (!code || !/^\d{4,6}$/.test(code)) continue;
-      const { startDate, endDate } = parseDisposalPeriod(row.DispositionPeriod);
+    const json = await resp.json();
+    if (!json.stocks || typeof json.stocks !== 'object') return;
+    for (const [code, info] of Object.entries(json.stocks)) {
       CACHE.disposals.set(code, {
-        minutes:   minutesFromMeasures(row.DispositionMeasures),
-        startDate,
-        endDate,
-        note: row.DispositionMeasures || '',
+        minutes:   info.minutes   || MINUTES_FIRST,
+        startDate: info.startDate || '',
+        endDate:   info.endDate   || '',
+        note:      info.note      || '',
       });
     }
+    console.log(`[處置清單] 已載入 ${CACHE.disposals.size} 支（更新：${json.updated ? json.updated.slice(0,16).replace('T',' ') : '未知'}）`);
   } catch (e) {
-    console.warn('[TWSE disposal]', e?.message);
-  }
-}
-
-// TPEx 上櫃處置清單
-// 欄位：SecuritiesCompanyCode, DispositionPeriod("1150605~1150618"), DisposalCondition
-// corsproxy.io 作為 CORS fallback（直連被瀏覽器 CORS 政策擋時使用）
-async function loadTPExDisposals() {
-  const direct = 'https://www.tpex.org.tw/openapi/v1/tpex_disposal_information';
-  const proxy  = `https://corsproxy.io/?url=${encodeURIComponent(direct)}`;
-
-  for (const url of [direct, proxy]) {
-    try {
-      const resp = await fetch(url);   // 不帶 Accept header → 簡單請求，避免觸發 preflight
-      if (!resp.ok) continue;
-      const list = await resp.json();
-      if (!Array.isArray(list) || !list.length) continue;
-      for (const item of list) {
-        const code = (item.SecuritiesCompanyCode || '').trim();
-        if (!code || !/^\d{4,6}$/.test(code)) continue;
-        const note = String(item.DisposalCondition || item.DispositionReasons || '');
-        const { startDate, endDate } = parseDisposalPeriod(item.DispositionPeriod);
-        CACHE.disposals.set(code, {
-          minutes:   minutesFromMeasures(note),
-          startDate,
-          endDate,
-          note,
-        });
-      }
-      console.log(`[TPEx disposal] 已載入，共 ${CACHE.disposals.size} 支，來源：${url === direct ? '直連' : '代理'}`);
-      return;
-    } catch (e) {
-      console.warn('[TPEx disposal] 失敗：', url, e?.message);
-    }
+    console.warn('[處置清單] 載入失敗：', e?.message);
   }
 }
 
@@ -209,11 +169,10 @@ async function analyzeAndRender(code) {
   container.prepend(loadingEl);
 
   try {
-    // 並行抓：價格資料 + 逐股處置狀態（FinMind）+ 等候官方處置快取
-    const [prices, finmindDisposal] = await Promise.all([
+    // 並行抓：價格資料 + 等候處置清單（disposal.json）
+    const [prices] = await Promise.all([
       fetchPrices(code),
-      fetchStockDisposalFromFinMind(code),
-      disposalCacheReady,   // 確保 TWSE/TPEx 快取已載入
+      disposalCacheReady,
     ]);
 
     if (!prices || prices.length < NOTICE_WINDOW) {
@@ -221,9 +180,7 @@ async function analyzeAndRender(code) {
     }
 
     const result = computeDispositionRisk(prices);
-
-    // 處置資訊優先順序：官方快取（TWSE/TPEx） → FinMind 個別查詢
-    const disposalInfo = CACHE.disposals?.get(code) || finmindDisposal || null;
+    const disposalInfo = CACHE.disposals?.get(code) || null;
 
     const card = buildCard(code, result, disposalInfo);
     loadingEl.replaceWith(card);
@@ -232,47 +189,6 @@ async function analyzeAndRender(code) {
     loadingEl.innerHTML = `<span style="color:#d93025">⚠ ${err.message}</span>`;
     setTimeout(() => loadingEl.remove(), 4000);
   }
-}
-
-// 用 FinMind 查詢單一股票的處置期間（涵蓋上市+上櫃）
-async function fetchStockDisposalFromFinMind(stockCode) {
-  try {
-    const today = formatDate(new Date());
-    const start = formatDate(daysAgo(20));
-    const url   = `${FINMIND_API}?dataset=TaiwanStockDispositionSecuritiesPeriod&data_id=${encodeURIComponent(stockCode)}&start_date=${start}&end_date=${today}`;
-    const resp  = await fetch(url);
-    if (!resp.ok) return null;
-    const json = await resp.json();
-    if (!json.data || json.data.length === 0) return null;
-
-    // 找今日仍在效的處置期間（end_date >= today 或 end_date 為空）
-    const active = json.data
-      .filter(d => !d.end_date || d.end_date >= today)
-      .sort((a, b) => (b.start_date || '').localeCompare(a.start_date || ''))[0];
-
-    if (!active) return null;
-
-    // FinMind 欄位名稱不確定，嘗試多種可能
-    const noteVal = active.disposal_memo || active.note || active.remark || active.description || '';
-    const minutes = extractMinutes(noteVal) || guessMinutesFromPeriod(active) || MINUTES_FIRST;
-
-    return {
-      minutes,
-      startDate: active.start_date || active.date || '',
-      endDate:   active.end_date   || '',
-      note:      noteVal,
-    };
-  } catch {
-    return null;
-  }
-}
-
-// 若無法從備註解析分鐘數，根據已有處置次數猜測
-function guessMinutesFromPeriod(record) {
-  // FinMind 可能有 disposal_type 或類似欄位
-  const typeStr = String(record.disposal_type || record.type || '');
-  if (typeStr.includes('20') || typeStr.includes('加重')) return MINUTES_REPEAT;
-  return null;
 }
 
 // ── FinMind 價格資料 ──────────────────────────────────
@@ -700,23 +616,17 @@ function normStr(s) {
   return s.replace(/[\s　]/g, '').toLowerCase();
 }
 
+// disposal.json 的日期已由 fetch-disposal.js 統一為 YYY/MM/DD 格式
 function formatROCDate(dateStr) {
   if (!dateStr) return '';
   let year, month, day;
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-    // ISO: 2025-05-26
     [year, month, day] = dateStr.split('-').map(Number);
   } else if (/^\d{3}[\/\-]\d{2}[\/\-]\d{2}$/.test(dateStr)) {
-    // ROC with slashes: 115/05/26（TWSE）
     const parts = dateStr.split(/[\/\-]/);
     year = parseInt(parts[0]) + 1911;
     month = parseInt(parts[1]);
     day = parseInt(parts[2]);
-  } else if (/^\d{7}$/.test(dateStr)) {
-    // ROC compact: 1150526（TPEx）
-    year  = parseInt(dateStr.substring(0, 3)) + 1911;
-    month = parseInt(dateStr.substring(3, 5));
-    day   = parseInt(dateStr.substring(5, 7));
   } else {
     return dateStr;
   }
@@ -724,31 +634,6 @@ function formatROCDate(dateStr) {
   const weekDays = ['日', '一', '二', '三', '四', '五', '六'];
   const weekDay  = weekDays[new Date(year, month - 1, day).getDay()];
   return `${rocYear}/${String(month).padStart(2,'0')}/${String(day).padStart(2,'0')}(${weekDay})`;
-}
-
-// "第一次處置" → 5分；"第二次/加重/曾發布處置" → 20分
-function minutesFromMeasures(str) {
-  const s = String(str || '');
-  const m = extractMinutes(s);
-  if (m) return m;
-  if (/第[二三四五六七八九十]次|加重|曾發布處置/.test(s)) return MINUTES_REPEAT;
-  return MINUTES_FIRST;
-}
-
-// 解析處置期間字串 → { startDate, endDate }
-// TWSE 格式："115/05/28～115/06/10"，多次處置："115/06/04～115/06/17；115/06/01～115/06/12"
-// TPEx 格式："1150528~1150610"
-// 多期間時取第一段（最新一次）
-function parseDisposalPeriod(period) {
-  if (!period) return { startDate: '', endDate: '' };
-  const firstPeriod = String(period).split(/[；;]/)[0].trim();
-  const parts = firstPeriod.split(/[～~]/);
-  return { startDate: (parts[0] || '').trim(), endDate: (parts[1] || '').trim() };
-}
-
-function extractMinutes(str) {
-  const m = String(str).match(/每\s*(\d+)\s*分鐘/);
-  return m ? parseInt(m[1]) : null;
 }
 
 function loadWatchlist() {
