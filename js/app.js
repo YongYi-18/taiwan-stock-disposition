@@ -6,6 +6,9 @@
 
 'use strict';
 
+// ── 版本 ──────────────────────────────────────────────
+const VERSION = '2026-06-05';
+
 // ── 常數 ──────────────────────────────────────────────
 const FINMIND_API   = 'https://api.finmindtrade.com/api/v4/data';
 const DATASET       = 'TaiwanStockPrice';
@@ -34,6 +37,7 @@ let disposalCacheReady = null;  // Promise，供 analyzeAndRender 等候
 
 // ── 頁面初始化 ────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('versionLabel').textContent = `v ${VERSION}`;
   renderWatchlistChips();
 
   document.getElementById('searchBtn').addEventListener('click', onSearch);

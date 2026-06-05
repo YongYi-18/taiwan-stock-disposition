@@ -50,6 +50,12 @@ header .subtitle {
   margin-top: 4px;
 }
 
+header .version-label {
+  font-size: 11px;
+  opacity: 0.55;
+  margin-top: 4px;
+}
+
 /* ===== 主內容 ===== */
 main {
   max-width: 640px;
