@@ -723,10 +723,14 @@ function minutesFromMeasures(str) {
   return MINUTES_FIRST;
 }
 
-// 解析 "115/05/28～115/06/10" 或 "1150528~1150610" → { startDate, endDate }
+// 解析處置期間字串 → { startDate, endDate }
+// TWSE 格式："115/05/28～115/06/10"，多次處置："115/06/04～115/06/17；115/06/01～115/06/12"
+// TPEx 格式："1150528~1150610"
+// 多期間時取第一段（最新一次）
 function parseDisposalPeriod(period) {
   if (!period) return { startDate: '', endDate: '' };
-  const parts = String(period).split(/[～~]/);
+  const firstPeriod = String(period).split(/[；;]/)[0].trim();
+  const parts = firstPeriod.split(/[～~]/);
   return { startDate: (parts[0] || '').trim(), endDate: (parts[1] || '').trim() };
 }
 
